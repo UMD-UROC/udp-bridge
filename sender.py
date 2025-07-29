@@ -15,8 +15,12 @@ MESSAGE_ID = 1
 FRAGMENT_SIZE = 1024
 
 def main():
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    # increase send buffer size to 4MB
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4 * 1024 * 1024)
+
     # read a local image in
-    filename = "small_plant.jpg"
+    filename = "large.jpg"
     image = cv2.imread(f"img_src/{filename}")
     if image is None:
         print(f"Error opening image img_src{filename}")
@@ -38,40 +42,35 @@ def main():
     payload_len = len(payload)
 
     # calculate FEC variables K + N, dependent on payload size
-    K, N = calculate_k_n(payload_len, fragment_size=FRAGMENT_SIZE)
-    payload_limit = K * FRAGMENT_SIZE
-    print(f"Calculated K: {K}, N: {N}")
-    print("Payload size: ", payload_len)
-    print(f"Alotted Fragment Space: {payload_limit}")
-
-    # check for issues with payload size/fragment limits
-    if payload_len > payload_limit:
-        raise ValueError("The payload is larger than the allotted data fragments.")
+    K, N, num_blocks, block_payload_size = choose_blocks_k_n(payload_len, fragment_size=FRAGMENT_SIZE)
+    print(f"Calculated K: {K}, N: {N}, Number of Blocks: {num_blocks}, Block size: {block_payload_size}")
+    print(f"For payload of size: {payload_len}")
 
     if N > 256:
-        raise ValueError(f"N={N} exceeds zfec limit (256 fragments max). Use chunking.")
-
-    # pad the payload with extra space for encoding
-    padded_payload = payload.ljust(payload_limit, b'\x00')
-    pad_len = payload_limit - payload_len
-
-    # Create the encoder
-    encoder = Encoder(K, N)
-    fragments = encoder.encode(padded_payload)
-
-    # check for appropriate number of fragments + check individual fragment sizes
-    if len(fragments) != N or any(len(frag) != FRAGMENT_SIZE for frag in fragments):
-        raise ValueError("FEC encoding did not produce correct fragment sizes.")
+        raise ValueError(f"N={N} exceeds zfec limit (256 fragments max).")
     
-    print(f"Encoded and split into {len(fragments)} fragments of size {FRAGMENT_SIZE}")
+    encoder = Encoder(K, N)
+    for block_index in range(num_blocks):
+        start = block_index * block_payload_size
+        end = start + block_payload_size
+        block = payload[start: end]
+        padded_block = block.ljust(block_payload_size, b'\x00')
+        pad_len = block_payload_size - len(block)
+        if pad_len != 0:
+            print(f"Encoding block {block_index}, with a pad length of: {pad_len}")
+        fragments = encoder.encode(padded_block)
+        # check for appropriate number of fragments + check individual fragment sizes
+        if len(fragments) != N or any(len(frag) != FRAGMENT_SIZE for frag in fragments):
+            raise ValueError("FEC encoding did not produce correct fragment sizes.")
 
-    # start python socket
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-
-    # send UDP packets
-    for idx, fragment in enumerate(fragments):
-        header = struct.pack("<IHHHI", MESSAGE_ID, idx, N, K, pad_len)
-        sock.sendto(header + fragment, (RX_IP, RX_PORT))
+        # print(f"Encoded and split into {len(fragments)} fragments of size {FRAGMENT_SIZE}") 
+        
+        print(f"Sending block: {block_index}")
+        for idx, fragment in enumerate(fragments):
+            header = struct.pack("<IHHHIIH", MESSAGE_ID, idx, N, K, pad_len, block_index, num_blocks)
+            sock.sendto(header + fragment, (RX_IP, RX_PORT))
+            # give the receiver time to breathe
+            time.sleep(0.001)
 
     # sleep as a safety buffer before fully closing socket
     time.sleep(0.01)
@@ -83,6 +82,40 @@ def calculate_k_n(payload_len, fragment_size=1024, redundancy_ratio=0.25, max_pa
     parity = min(int(K * redundancy_ratio), max_parity)
     N = K + parity
     return K, N
+
+def choose_blocks_k_n(payload_len, fragment_size=1024, target_redundancy=0.25, max_n=256, min_k=16):
+    best = None
+    best_efficiency = 0.0
+
+    # Try increasing block sizes (K * fragment_size)
+    for K in range(min_k, max_n):
+        N = K + int(K * target_redundancy)
+        if N > max_n:
+            continue
+
+        block_payload_size = K * fragment_size
+        num_blocks = math.ceil(payload_len / block_payload_size)
+
+        total_encoded_bytes = num_blocks * N * fragment_size
+        total_payload_bytes = payload_len
+
+        efficiency = total_payload_bytes / total_encoded_bytes
+
+        if efficiency > best_efficiency:
+            best = {
+                "K": K,
+                "N": N,
+                "num_blocks": num_blocks,
+                "block_payload_size": block_payload_size,
+                "total_encoded_bytes": total_encoded_bytes,
+                "efficiency": efficiency,
+            }
+            best_efficiency = efficiency
+    if best is None:
+        raise ValueError("Unable to find K, N for the given payload")
+
+    return best["K"], best["N"], best["num_blocks"], best["block_payload_size"]
+
 
 if __name__ == "__main__":
     main()
