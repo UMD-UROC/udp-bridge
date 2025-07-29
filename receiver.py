@@ -11,6 +11,7 @@ RX_IP = "127.0.0.1"
 RX_PORT = 5005
 
 FRAGMENT_SIZE = 1024
+HEADER_SIZE = 20
 
 FRAG_KEY = 'fragments'
 K_KEY = 'K'
@@ -36,11 +37,11 @@ def main():
 
     while True:
         # pull data from socket, one fragment at a time
-        data, _ = sock.recvfrom(FRAGMENT_SIZE + 20)
+        data, _ = sock.recvfrom(FRAGMENT_SIZE + HEADER_SIZE)
 
         # unpack UDP packet
-        msg_id, frag_idx, total, k_val, padlen, block_idx, num_blocks = struct.unpack("<IHHHIIH", data[:20])
-        fragment = data[20:]
+        msg_id, frag_idx, total, k_val, padlen, block_idx, num_blocks = struct.unpack("<IHHHIIH", data[:HEADER_SIZE])
+        fragment = data[HEADER_SIZE:]
 
         # check if we have already completed this image, discard extra packets
         if msg_id in complete_images:
